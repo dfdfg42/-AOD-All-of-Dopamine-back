@@ -10,6 +10,7 @@ import com.example.shared.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -33,6 +34,11 @@ public class WorkApiService {
     private final WebnovelContentRepository webnovelContentRepository;
     private final PlatformDataRepository platformDataRepository;
     // private final ContentRatingRepository contentRatingRepository;
+    
+    // OTT Watch Providers (영화/시리즈에서 watchProviders 필터링에 사용)
+    private static final Set<String> OTT_WATCH_PROVIDERS = Set.of(
+            "netflix", "watcha", "disney plus", "tving", "wavve", "coupang play", "apple tv"
+    );
 
     /**
      * 작품 목록 조회 (필터링, 페이징)
@@ -130,11 +136,34 @@ public class WorkApiService {
                     .collect(Collectors.toList());
         }
         
-        // 플랫폼 필터링 (있는 경우)
+        // 플랫폼 필터링 (있는 경우) - MOVIE/TV는 watchProviders, 나머지는 PlatformData
         if (platforms != null && !platforms.isEmpty()) {
-            filteredContents = filteredContents.stream()
-                    .filter(c -> filterByPlatforms(c, platforms))
-                    .collect(Collectors.toList());
+            if (domain == Domain.MOVIE || domain == Domain.TV) {
+                // OTT 플랫폼과 데이터 소스 플랫폼 분리
+                List<String> lowerPlatforms = platforms.stream()
+                        .map(String::toLowerCase)
+                        .collect(Collectors.toList());
+                List<String> ottPlatforms = lowerPlatforms.stream()
+                        .filter(OTT_WATCH_PROVIDERS::contains)
+                        .collect(Collectors.toList());
+                
+                if (!ottPlatforms.isEmpty()) {
+                    // watchProviders로 필터링
+                    filteredContents = filteredContents.stream()
+                            .filter(c -> filterByWatchProviders(c, ottPlatforms))
+                            .collect(Collectors.toList());
+                } else {
+                    // 데이터 소스 플랫폼으로 필터링
+                    filteredContents = filteredContents.stream()
+                            .filter(c -> filterByPlatforms(c, platforms))
+                            .collect(Collectors.toList());
+                }
+            } else {
+                // GAME, WEBTOON, WEBNOVEL: 기존 방식
+                filteredContents = filteredContents.stream()
+                        .filter(c -> filterByPlatforms(c, platforms))
+                        .collect(Collectors.toList());
+            }
         }
         
         // 정렬 및 페이징 적용
@@ -143,40 +172,158 @@ public class WorkApiService {
     
     /**
      * 플랫폼 필터링만 있는 경우
-     * ⚠️ 개선: DB 레벨에서 플랫폼 필터링 (메모리 부하 해결)
+     * ✨ 개선: 도메인 테이블의 platforms 컬럼을 이용한 직접 쿼리 (genres와 동일한 패턴)
      */
     private PageResponse<WorkSummaryDTO> getWorksByPlatforms(Domain domain, String keyword, List<String> platforms, Pageable pageable) {
-        // 플랫폼 이름을 소문자로 변환 (쿼리에서 LOWER 사용)
-        List<String> lowerPlatforms = platforms.stream()
-                .map(String::toLowerCase)
-                .collect(Collectors.toList());
+        log.debug("getWorksByPlatforms - domain: {}, platforms: {}", domain, platforms);
         
-        Page<Content> contentPage;
+        if (domain == null) {
+            log.warn("Platform filtering requires domain to be specified");
+            return getWorksWithoutFiltering(null, keyword, pageable);
+        }
         
-        // DB 레벨에서 플랫폼 필터링
+        // Sort 제거한 Pageable 생성 (Repository 쿼리에 ORDER BY가 고정되어 있음)
+        Pageable pageableWithoutSort = PageRequest.of(
+            pageable.getPageNumber(),
+            pageable.getPageSize()
+        );
+        
+        // 플랫폼 배열로 변환 (대소문자 그대로 유지)
+        String[] platformArray = platforms.toArray(String[]::new);
+        
+        // 도메인별로 직접 쿼리 (genres와 동일한 패턴)
+        Page<?> domainPage;
+        switch (domain) {
+            case MOVIE:
+                domainPage = movieContentRepository.findByPlatformsContainingAll(platformArray, pageableWithoutSort);
+                break;
+            case TV:
+                domainPage = tvContentRepository.findByPlatformsContainingAll(platformArray, pageableWithoutSort);
+                break;
+            case GAME:
+                domainPage = gameContentRepository.findByPlatformsContainingAll(platformArray, pageableWithoutSort);
+                break;
+            case WEBTOON:
+                domainPage = webtoonContentRepository.findByPlatformsContainingAll(platformArray, pageableWithoutSort);
+                break;
+            case WEBNOVEL:
+                domainPage = webnovelContentRepository.findByPlatformsContainingAll(platformArray, pageableWithoutSort);
+                break;
+            default:
+                return emptyResponse();
+        }
+        
+        // Domain Content를 Content로 변환
+        List<Content> contents = domainPage.getContent().stream()
+            .map(d -> {
+                switch (domain) {
+                    case MOVIE: return ((MovieContent) d).getContent();
+                    case TV: return ((TvContent) d).getContent();
+                    case GAME: return ((GameContent) d).getContent();
+                    case WEBTOON: return ((WebtoonContent) d).getContent();
+                    case WEBNOVEL: return ((WebnovelContent) d).getContent();
+                    default: return null;
+                }
+            })
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+        
+        // 키워드 필터링 (있는 경우)
         if (keyword != null && !keyword.isBlank()) {
-            if (domain != null) {
-                contentPage = contentRepository.findByDomainAndKeywordAndPlatforms(domain, keyword, lowerPlatforms, pageable);
-            } else {
-                contentPage = contentRepository.findByKeywordAndPlatforms(keyword, lowerPlatforms, pageable);
-            }
-        } else if (domain != null) {
-            contentPage = contentRepository.findByDomainAndPlatforms(domain, lowerPlatforms, pageable);
-        } else {
-            contentPage = contentRepository.findByPlatforms(lowerPlatforms, pageable);
+            String lowerKeyword = keyword.toLowerCase();
+            contents = contents.stream()
+                    .filter(c -> c.getMasterTitle().toLowerCase().contains(lowerKeyword) ||
+                               (c.getOriginalTitle() != null && c.getOriginalTitle().toLowerCase().contains(lowerKeyword)))
+                    .collect(Collectors.toList());
         }
         
         return PageResponse.<WorkSummaryDTO>builder()
-                .content(contentPage.getContent().stream()
+                .content(contents.stream()
                         .map(this::toWorkSummary)
                         .collect(Collectors.toList()))
-                .page(contentPage.getNumber())
-                .size(contentPage.getSize())
-                .totalElements(contentPage.getTotalElements())
-                .totalPages(contentPage.getTotalPages())
-                .first(contentPage.isFirst())
-                .last(contentPage.isLast())
+                .page(domainPage.getNumber())
+                .size(domainPage.getSize())
+                .totalElements(domainPage.getTotalElements())
+                .totalPages(domainPage.getTotalPages())
+                .first(domainPage.isFirst())
+                .last(domainPage.isLast())
                 .build();
+    }
+    
+    /**
+     * 빈 응답 반환
+     */
+    private PageResponse<WorkSummaryDTO> emptyResponse() {
+        return PageResponse.<WorkSummaryDTO>builder()
+                .content(Collections.emptyList())
+                .page(0).size(0).totalElements(0L).totalPages(0)
+                .first(true).last(true).build();
+    }
+    
+    /**
+     * ⚠️ Deprecated: 기존 Watch Providers 기반 필터링 (복잡한 로직)
+     * 새로운 platforms 컬럼 방식으로 대체됨
+     */
+    @Deprecated
+    private PageResponse<WorkSummaryDTO> getWorksByWatchProviders(
+            Domain domain, String keyword, List<String> ottPlatforms, List<String> sourcePlatforms, Pageable pageable) {
+        
+        log.debug("getWorksByWatchProviders - domain: {}, keyword: {}, ottPlatforms: {}, sourcePlatforms: {}", 
+                  domain, keyword, ottPlatforms, sourcePlatforms);
+        
+        // 각 OTT별로 쿼리 후 교집합 구하기 (AND 방식)
+        Set<Long> contentIdSet = null;
+        for (String ottPlatform : ottPlatforms) {
+            List<Long> ids = platformDataRepository.findContentIdsByDomainAndWatchProvider(
+                    domain.name(), ottPlatform);
+            if (contentIdSet == null) {
+                contentIdSet = new HashSet<>(ids);
+            } else {
+                contentIdSet.retainAll(ids);  // 교집합 (AND)
+            }
+            
+            // 교집합이 비어지면 더 이상 검색할 필요 없음
+            if (contentIdSet.isEmpty()) {
+                break;
+            }
+        }
+        
+        if (contentIdSet == null || contentIdSet.isEmpty()) {
+            log.debug("No content found for watch providers: {}", ottPlatforms);
+            return PageResponse.<WorkSummaryDTO>builder()
+                    .content(Collections.emptyList())
+                    .page(0).size(0).totalElements(0L).totalPages(0)
+                    .first(true).last(true).build();
+        }
+        
+        List<Long> contentIds = new ArrayList<>(contentIdSet);
+        
+        // Content ID로 Content 조회
+        List<Content> filteredContents = contentRepository.findByContentIdIn(contentIds);
+        
+        // 도메인 필터링 (안전 장치)
+        filteredContents = filteredContents.stream()
+                .filter(c -> c.getDomain() == domain)
+                .collect(Collectors.toList());
+        
+        // 키워드 필터링 (있는 경우)
+        if (keyword != null && !keyword.isBlank()) {
+            String lowerKeyword = keyword.toLowerCase();
+            filteredContents = filteredContents.stream()
+                    .filter(c -> c.getMasterTitle().toLowerCase().contains(lowerKeyword) ||
+                               (c.getOriginalTitle() != null && c.getOriginalTitle().toLowerCase().contains(lowerKeyword)))
+                    .collect(Collectors.toList());
+        }
+        
+        // 데이터 소스 플랫폼 필터링 (TMDB_MOVIE, TMDB_TV 등이 추가로 선택된 경우)
+        if (!sourcePlatforms.isEmpty()) {
+            filteredContents = filteredContents.stream()
+                    .filter(c -> filterByPlatforms(c, sourcePlatforms))
+                    .collect(Collectors.toList());
+        }
+        
+        // 정렬 및 페이징 적용
+        return applyPaginationAndMapping(filteredContents, pageable);
     }
     
     /**
@@ -369,7 +516,7 @@ public class WorkApiService {
                     info.put("developer", game.getDeveloper());
                     info.put("publisher", game.getPublisher());
                     if (game.getGenres() != null) info.put("genres", game.getGenres());
-                    if (game.getPlatforms() != null) info.putAll(game.getPlatforms());
+                    if (game.getPlatforms() != null) info.put("platforms", game.getPlatforms());
                     if (game.getContent().getReleaseDate() != null) {
                         info.put("releaseDate", game.getContent().getReleaseDate().toString());
                     }
@@ -445,10 +592,8 @@ public class WorkApiService {
             allContent = contentRepository.findReleasesInDateRange(threeMonthsAgo, now, Pageable.unpaged()).getContent();
         }
 
-        // 플랫폼 필터링
-        List<Content> filteredContent = allContent.stream()
-                .filter(c -> filterByPlatforms(c, platforms))
-                .collect(Collectors.toList());
+        // 플랫폼 필터링 - MOVIE/TV는 watchProviders, 나머지는 PlatformData
+        List<Content> filteredContent = filterContentByPlatforms(allContent, domain, platforms);
 
         // 수동 페이징
         int start = (int) pageable.getOffset();
@@ -488,10 +633,8 @@ public class WorkApiService {
             allContent = contentRepository.findUpcomingReleases(now, Pageable.unpaged()).getContent();
         }
 
-        // 플랫폼 필터링
-        List<Content> filteredContent = allContent.stream()
-                .filter(c -> filterByPlatforms(c, platforms))
-                .collect(Collectors.toList());
+        // 플랫폼 필터링 - MOVIE/TV는 watchProviders, 나머지는 PlatformData
+        List<Content> filteredContent = filterContentByPlatforms(allContent, domain, platforms);
 
         // 수동 페이징
         int start = (int) pageable.getOffset();
@@ -534,6 +677,80 @@ public class WorkApiService {
         return platformDataList.stream()
                 .anyMatch(pd -> platforms.stream()
                         .anyMatch(platform -> pd.getPlatformName().equalsIgnoreCase(platform)));
+    }
+    
+    /**
+     * Watch Provider (OTT) 필터링 헬퍼 메서드 (복수 OTT 지원) - 영화/시리즈 전용
+     * PlatformData.attributes.watch_providers 필드에서 Netflix, Watcha 등의 OTT 플랫폼 확인
+     */
+    @SuppressWarnings("unchecked")
+    private boolean filterByWatchProviders(Content content, List<String> ottPlatforms) {
+        if (ottPlatforms == null || ottPlatforms.isEmpty()) {
+            return true; // 필터링 없음
+        }
+
+        // PlatformData에서 watch_providers 확인
+        List<PlatformData> platformDataList = platformDataRepository.findByContent(content);
+        if (platformDataList.isEmpty()) {
+            return false;
+        }
+        
+        // 해당 컨텐츠의 모든 PlatformData에서 watch_providers 수집
+        Set<String> contentWatchProviders = new HashSet<>();
+        for (PlatformData pd : platformDataList) {
+            Map<String, Object> attributes = pd.getAttributes();
+            if (attributes != null && attributes.containsKey("watch_providers")) {
+                Object watchProvidersObj = attributes.get("watch_providers");
+                if (watchProvidersObj instanceof List) {
+                    List<String> watchProviders = (List<String>) watchProvidersObj;
+                    watchProviders.stream()
+                            .map(String::toLowerCase)
+                            .forEach(contentWatchProviders::add);
+                }
+            }
+        }
+        
+        if (contentWatchProviders.isEmpty()) {
+            return false;
+        }
+        
+        // 선택된 OTT 플랫폼 중 하나라도 포함되어 있으면 true (OR 조건)
+        return ottPlatforms.stream()
+                .anyMatch(contentWatchProviders::contains);
+    }
+    
+    /**
+     * 콘텐츠 리스트에 대한 플랫폼 필터링 (공통 로직)
+     * - MOVIE/TV 도메인: OTT Watch Provider로 필터링 (Netflix, Watcha 등)
+     * - GAME/WEBTOON/WEBNOVEL 도메인: PlatformData로 필터링 (기존 방식)
+     */
+    private List<Content> filterContentByPlatforms(List<Content> contents, Domain domain, List<String> platforms) {
+        if (platforms == null || platforms.isEmpty()) {
+            return contents; // 필터링 없음
+        }
+        
+        List<String> lowerPlatforms = platforms.stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.toList());
+        
+        // MOVIE/TV 도메인: OTT 플랫폼 분리 후 필터링
+        if (domain != null && (domain == Domain.MOVIE || domain == Domain.TV)) {
+            List<String> ottPlatforms = lowerPlatforms.stream()
+                    .filter(OTT_WATCH_PROVIDERS::contains)
+                    .collect(Collectors.toList());
+            
+            if (!ottPlatforms.isEmpty()) {
+                // watchProviders로 필터링
+                return contents.stream()
+                        .filter(c -> filterByWatchProviders(c, ottPlatforms))
+                        .collect(Collectors.toList());
+            }
+        }
+        
+        // GAME, WEBTOON, WEBNOVEL 또는 OTT가 아닌 플랫폼: 기존 PlatformData 필터링
+        return contents.stream()
+                .filter(c -> filterByPlatforms(c, platforms))
+                .collect(Collectors.toList());
     }
 
     /**

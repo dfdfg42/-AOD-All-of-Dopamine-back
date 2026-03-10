@@ -47,6 +47,18 @@ services:
           cpus: '0.5'
           memory: 512M
 
+    # 🚀 로그 파일 영구 저장 (호스트에 마운트)
+    volumes:
+      - ./logs:/app/logs  # 로그 파일을 호스트에 저장
+    
+    # 🔥 Docker 컨테이너 로그 rotation (디스크 공간 보호)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"      # 각 로그 파일 최대 10MB
+        max-file: "3"        # 최대 3개 파일 보관 (총 30MB)
+        compress: "true"     # 로그 압축 활성화
+    
     networks:
       - aod-crawler-network
     restart: unless-stopped

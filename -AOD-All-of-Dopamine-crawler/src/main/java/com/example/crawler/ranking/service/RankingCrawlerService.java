@@ -9,7 +9,6 @@ import com.example.shared.repository.ExternalRankingRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -35,7 +34,6 @@ public class RankingCrawlerService {
      * - Steam (최고 판매)
      * - TMDB (인기 영화 & TV 쇼)
      */
-    @Transactional
     public List<ExternalRanking> crawlAndGetAllRankings() {
         log.info("전체 플랫폼 랭킹 크롤링을 시작합니다.");
         
@@ -54,11 +52,11 @@ public class RankingCrawlerService {
             
             // 4. TMDB 영화
             log.info("4/5 - TMDB 영화 랭킹 크롤링 중...");
-            tmdbRankingService.updatePopularMoviesRanking();
+            tmdbRankingService.updatePopularMoviesRanking(100);
             
             // 5. TMDB TV 쇼
             log.info("5/5 - TMDB TV 쇼 랭킹 크롤링 중...");
-            tmdbRankingService.updatePopularTvShowsRanking();
+            tmdbRankingService.updatePopularTvShowsRanking(100);
             
             log.info("전체 플랫폼 랭킹 크롤링이 완료되었습니다.");
             
@@ -74,7 +72,6 @@ public class RankingCrawlerService {
     /**
      * 네이버 웹툰 랭킹만 크롤링
      */
-    @Transactional
     public void crawlNaverWebtoonRanking() {
         log.info("네이버 웹툰 랭킹 크롤링 시작");
         naverWebtoonRankingService.updateTodayWebtoonRanking();
@@ -84,7 +81,6 @@ public class RankingCrawlerService {
     /**
      * 네이버 시리즈 랭킹만 크롤링
      */
-    @Transactional
     public void crawlNaverSeriesRanking() {
         log.info("네이버 시리즈 랭킹 크롤링 시작");
         naverSeriesRankingService.updateDailyRanking();
@@ -94,7 +90,6 @@ public class RankingCrawlerService {
     /**
      * Steam 랭킹만 크롤링
      */
-    @Transactional
     public void crawlSteamRanking() {
         log.info("Steam 랭킹 크롤링 시작");
         steamRankingService.updateTopSellersRanking();
@@ -104,11 +99,10 @@ public class RankingCrawlerService {
     /**
      * TMDB 랭킹만 크롤링 (영화 + TV)
      */
-    @Transactional
     public void crawlTmdbRanking() {
         log.info("TMDB 랭킹 크롤링 시작");
-        tmdbRankingService.updatePopularMoviesRanking();
-        tmdbRankingService.updatePopularTvShowsRanking();
+        tmdbRankingService.updatePopularMoviesRanking(100);
+        tmdbRankingService.updatePopularTvShowsRanking(100);
         log.info("TMDB 랭킹 크롤링 완료");
     }
 }

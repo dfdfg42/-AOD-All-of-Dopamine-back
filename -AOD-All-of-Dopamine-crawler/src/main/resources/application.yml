@@ -2,19 +2,26 @@ spring:
   application:
     name: aod-crawler
 
+  docker:
+    compose:
+      enabled: false
+
   datasource:
-    url: jdbc:postgresql://localhost:5432/postgres
-    username: postgres
-    password: 7292
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:postgres}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:password}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 20
-      minimum-idle: 5
+      maximum-pool-size: 5   # 🚀 20 → 5 (EC2 t3.small 최적화)
+      minimum-idle: 2        # 🚀 5 → 2
       connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
 
   jpa:
     hibernate:
-      ddl-auto: create  # 크롤러는 스키마 변경 금지
+      ddl-auto: ${DDL_AUTO:update}  # Job Queue 테이블 자동 생성/수정
     show-sql: false
     properties:
       hibernate:
@@ -23,14 +30,24 @@ spring:
         default_schema: public
         jdbc:
           batch_size: 50
+          batch_versioned_data: true
+          use_streams_for_binary: true
         order_inserts: true
         order_updates: true
+        default_batch_fetch_size: 50
+        query:
+          plan_cache_max_size: 2048
+          plan_parameter_metadata_max_size: 128
 
   jackson:
     serialization:
       write-dates-as-timestamps: false
     deserialization:
       fail-on-unknown-properties: false
+
+  cache:
+    type: simple
+    cache-names: traditional-recommendations,llm-recommendations
 
 # 스케줄링 설정
 scheduling:
@@ -47,28 +64,79 @@ logging:
     org.springframework.web: INFO
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/crawler.log      # 로그 파일 경로
+    max-size: 100MB              # 파일 최대 크기 (100MB 초과 시 로테이션)
+    max-history: 30              # 30일치 로그 파일 보관
+    total-size-cap: 3GB          # 전체 로그 파일 최대 용량
 
 # 모니터링 설정
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: health,info,metrics,prometheus,threaddump
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
   metrics:
     export:
       prometheus:
         enabled: true
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${spring.profiles.active:local}
+    enable:
+      jvm: true
+      process: true
+      system: true
+      tomcat: true
+      logback: true
+      executor: true
+  info:
+    env:
+      enabled: true
+
+# 애플리케이션 정보
+info:
+  app:
+    name: AOD Crawler
+    description: Content Aggregation & Crawling System
+    version: 1.0.0
 
 # Sentry (에러 추적)
 sentry:
-  dsn: ${SENTRY_DSN:}
-  environment: ${SENTRY_ENVIRONMENT:development}
-  traces-sample-rate: 1.0
+  dsn: ${SENTRY_DSN}
+  environment: ${spring.profiles.active:local}
+  traces-sample-rate: 0.1
+  logging:
+    minimum-event-level: error
+    minimum-breadcrumb-level: info
+  send-default-pii: true
+  enable-tracing: true
+  tags:
+    application: ${spring.application.name}
+    version: ${info.app.version:1.0.0}
+  ignored-exceptions-for-type: org.springframework.web.HttpRequestMethodNotSupportedException
 
 # 서버 설정
 server:
   port: 8081  # API 서버와 분리 (8080과 다른 포트)
   shutdown: graceful
+  tomcat:
+    threads:
+      max: 20      # 🚀 200 → 20 (EC2 t3.small 최적화)
+      min-spare: 2  # 🚀 10 → 2
+    max-connections: 1000    # 🚀 10000 → 1000
+    accept-count: 50         # 🚀 100 → 50
+    connection-timeout: 20000
 
 # 크롤러 전용 설정
 crawler:
@@ -80,10 +148,16 @@ crawler:
     api-key: ${TMDB_API_KEY}
     language: ko-KR
   batch:
-    size: 100
-    transform-interval: 600000  # 10분
+    size: 50              # 🚀 100 → 50 (EC2 t3.small 최적화)
+    transform-interval: 900000  # 🚀 10분 → 15분 (600000 → 900000)
+  
+  # 🚀 리소스 제어 (EC2 t3.small 안전 한계)
+  # CrawlJobConsumer에서 하드코딩됨:
+  # - MAX_CONCURRENT_JOBS = 10  (전역 최대 동시 처리)
+  # - MAX_SELENIUM_JOBS = 2     (Selenium 최대 동시 처리)
+  # Phase 2에서 환경변수로 변경 예정
 
-# API Keys (backward compatibility)
+# API Keys (환경변수로 주입 필요)
 tmdb:
   api:
     key: ${TMDB_API_KEY}
@@ -96,4 +170,13 @@ openai:
   api:
     key: ${OPENAI_API_KEY}
     url: https://api.openai.com/v1/chat/completions
+
+# 추천 시스템 설정
+recommendation:
+  traditional:
+    max-items-per-category: 10
+  llm:
+    max-tokens: 1500
+    temperature: 0.7
+    model: gpt-3.5-turbo
 

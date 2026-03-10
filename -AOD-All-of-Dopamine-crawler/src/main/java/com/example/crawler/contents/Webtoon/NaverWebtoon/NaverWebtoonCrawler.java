@@ -1,6 +1,5 @@
 package com.example.crawler.contents.Webtoon.NaverWebtoon;
 
-
 import com.example.crawler.ingest.CollectorService;
 import com.example.crawler.util.InterruptibleSleep;
 import lombok.extern.slf4j.Slf4j;
@@ -27,9 +26,10 @@ public class NaverWebtoonCrawler {
     // URL 상수들
     private static final String BASE_WEEKDAY_URL = "https://m.comic.naver.com/webtoon/weekday?week=";
     private static final String BASE_FINISH_URL = "https://m.comic.naver.com/webtoon/finish";
-    private static final String[] WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"};
+    private static final String[] WEEKDAYS = { "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
 
-    public NaverWebtoonCrawler(CollectorService collector, WebtoonPageParser pageParser, MobileListParser mobileListParser) {
+    public NaverWebtoonCrawler(CollectorService collector, WebtoonPageParser pageParser,
+            MobileListParser mobileListParser) {
         this.collector = collector;
         this.pageParser = pageParser;
         this.mobileListParser = mobileListParser;
@@ -91,7 +91,7 @@ public class NaverWebtoonCrawler {
             cleanupParser();
         }
     }
-    
+
     /**
      * WebDriver 자원 정리 (Selenium 파서인 경우)
      */
@@ -102,9 +102,53 @@ public class NaverWebtoonCrawler {
     }
 
     /**
+     * 단일 웹툰 크롤링 (Job Queue용)
+     * titleId로 특정 웹툰만 크롤링
+     * 
+     * @param titleId 웹툰 고유 ID
+     * @return 크롤링 성공 여부
+     */
+    public boolean crawlWebtoonByTitleId(String titleId) {
+        log.debug("📚 [Webtoon] 웹툰 titleId {} 크롤링 시작", titleId);
+
+        try {
+            // 모바일 웹툰 상세 URL 생성
+            String mobileUrl = "https://m.comic.naver.com/webtoon/list?titleId=" + titleId;
+
+            // 기본 정보 임시 DTO 생성 (PC 페이지에서 전체 정보 가져올 예정)
+            NaverWebtoonDTO basicDTO = NaverWebtoonDTO.builder()
+                    .titleId(titleId)
+                    .crawlSource("NaverWebtoon-Single")
+                    .build();
+
+            // PC 페이지에서 상세 정보 가져오기
+            NaverWebtoonDTO enrichedDTO = enrichWithPcDetails(basicDTO, mobileUrl);
+
+            if (enrichedDTO == null) {
+                log.warn("웹툰 titleId {} 상세 정보 가져오기 실패", titleId);
+                return false;
+            }
+
+            // raw_items에 저장
+            saveToRaw(enrichedDTO);
+
+            log.debug("✅ [Webtoon] 웹툰 titleId {} 크롤링 완료: {}", titleId, enrichedDTO.getTitle());
+            return true;
+
+        } catch (Exception e) {
+            log.error("❌ [Webtoon] 웹툰 titleId {} 크롤링 실패", titleId, e);
+            return false;
+        } finally {
+            // 자원 정리
+            cleanupParser();
+        }
+    }
+
+    /**
      * 웹툰 목록 크롤링 (페이지네이션 지원)
      */
-    private int crawlWebtoonListWithPagination(String baseUrl, String crawlSource, String weekday, int maxPages) throws Exception {
+    private int crawlWebtoonListWithPagination(String baseUrl, String crawlSource, String weekday, int maxPages)
+            throws Exception {
         int totalSaved = 0;
         int page = 1;
 
@@ -114,8 +158,9 @@ public class NaverWebtoonCrawler {
                 log.info("작업 인터럽트 감지, 크롤링 중단 (현재까지 {}개 저장)", totalSaved);
                 return totalSaved;
             }
-            
-            if (maxPages > 0 && page > maxPages) break;
+
+            if (maxPages > 0 && page > maxPages)
+                break;
 
             String pageUrl = baseUrl + (baseUrl.contains("?") ? "&page=" : "?page=") + page;
 
@@ -123,7 +168,8 @@ public class NaverWebtoonCrawler {
                 Document listDoc = get(pageUrl);
 
                 // 목록에서 웹툰과 기본 정보를 함께 추출
-                Map<String, NaverWebtoonDTO> webtoonsWithBasicInfo = extractWebtoonsWithBasicInfo(listDoc, crawlSource, weekday);
+                Map<String, NaverWebtoonDTO> webtoonsWithBasicInfo = extractWebtoonsWithBasicInfo(listDoc, crawlSource,
+                        weekday);
 
                 if (webtoonsWithBasicInfo.isEmpty()) {
                     log.info("페이지 {}에서 더 이상 웹툰이 없음, 크롤링 종료", page);
@@ -140,13 +186,14 @@ public class NaverWebtoonCrawler {
                     try {
                         // PC 페이지에서 상세 정보 보완
                         NaverWebtoonDTO completeDTO = enrichWithPcDetails(basicDTO, mobileUrl);
-                        
+
                         // 19금 작품 등으로 제목을 찾을 수 없는 경우 스킵
-                        if (completeDTO == null || completeDTO.getTitle() == null || completeDTO.getTitle().trim().isEmpty()) {
+                        if (completeDTO == null || completeDTO.getTitle() == null
+                                || completeDTO.getTitle().trim().isEmpty()) {
                             log.info("제목을 찾을 수 없는 작품 스킵 (19금 등): {}", mobileUrl);
                             continue;
                         }
-                        
+
                         saveToRaw(completeDTO);
                         totalSaved++;
 
@@ -189,7 +236,8 @@ public class NaverWebtoonCrawler {
         Document listDoc = get(url);
 
         // 목록에서 웹툰과 기본 정보를 함께 추출
-        Map<String, NaverWebtoonDTO> webtoonsWithBasicInfo = extractWebtoonsWithBasicInfo(listDoc, crawlSource, weekday);
+        Map<String, NaverWebtoonDTO> webtoonsWithBasicInfo = extractWebtoonsWithBasicInfo(listDoc, crawlSource,
+                weekday);
 
         if (webtoonsWithBasicInfo.isEmpty()) {
             log.warn("웹툰 목록이 비어있음: {}", url);
@@ -206,13 +254,13 @@ public class NaverWebtoonCrawler {
             try {
                 // PC 페이지에서 상세 정보 보완
                 NaverWebtoonDTO completeDTO = enrichWithPcDetails(basicDTO, mobileUrl);
-                
+
                 // 19금 작품 등으로 제목을 찾을 수 없는 경우 스킵
                 if (completeDTO == null || completeDTO.getTitle() == null || completeDTO.getTitle().trim().isEmpty()) {
                     log.info("제목을 찾을 수 없는 작품 스킵 (19금 등): {}", mobileUrl);
                     continue;
                 }
-                
+
                 saveToRaw(completeDTO);
                 saved++;
 
@@ -237,14 +285,15 @@ public class NaverWebtoonCrawler {
     /**
      * 모바일 목록에서 웹툰과 기본 정보를 함께 추출
      */
-    private Map<String, NaverWebtoonDTO> extractWebtoonsWithBasicInfo(Document listDoc, String crawlSource, String weekday) {
+    private Map<String, NaverWebtoonDTO> extractWebtoonsWithBasicInfo(Document listDoc, String crawlSource,
+            String weekday) {
         return mobileListParser.extractWebtoonsWithBasicInfo(listDoc, crawlSource, weekday);
     }
 
     /**
      * PC 웹툰 상세 페이지에서 추가 정보를 보완하여 완전한 DTO 생성
      *
-     * @param basicDTO 목록에서 추출한 기본 정보
+     * @param basicDTO  목록에서 추출한 기본 정보
      * @param mobileUrl 모바일 URL
      * @return 완전한 웹툰 정보가 담긴 DTO
      */
@@ -258,7 +307,8 @@ public class NaverWebtoonCrawler {
             Document pcDoc = get(pcUrl);
 
             // PC 페이지에서 추가 정보 파싱하여 기본 DTO에 보완
-            NaverWebtoonDTO enrichedDTO = pageParser.parseWebtoonDetail(pcDoc, pcUrl, basicDTO.getCrawlSource(), basicDTO.getWeekday());
+            NaverWebtoonDTO enrichedDTO = pageParser.parseWebtoonDetail(pcDoc, pcUrl, basicDTO.getCrawlSource(),
+                    basicDTO.getWeekday());
 
             if (enrichedDTO != null) {
                 // 목록에서 수집한 기본 정보를 우선 사용하고, PC에서 수집한 정보로 보완
@@ -280,15 +330,17 @@ public class NaverWebtoonCrawler {
      */
     private NaverWebtoonDTO mergeBasicAndDetailedInfo(NaverWebtoonDTO basicDTO, NaverWebtoonDTO detailedDTO) {
         return NaverWebtoonDTO.builder()
-                // 목록에서 수집한 정보 우선 사용
-                .title(basicDTO.getTitle())
+                // [수정] Job Queue 모드에서는 basicDTO가 비어있으므로 detailedDTO 우선 사용
+                .title(basicDTO.getTitle() != null ? basicDTO.getTitle() : detailedDTO.getTitle())
                 .author(basicDTO.getAuthor() != null ? basicDTO.getAuthor() : detailedDTO.getAuthor())
                 .imageUrl(basicDTO.getImageUrl() != null ? basicDTO.getImageUrl() : detailedDTO.getImageUrl())
                 .titleId(basicDTO.getTitleId())
-                .weekday(basicDTO.getWeekday())
+                .weekday(basicDTO.getWeekday() != null && !basicDTO.getWeekday().isEmpty() 
+                        ? basicDTO.getWeekday() : detailedDTO.getWeekday())
                 .status(basicDTO.getStatus() != null ? basicDTO.getStatus() : detailedDTO.getStatus())
                 .likeCount(basicDTO.getLikeCount() != null ? basicDTO.getLikeCount() : detailedDTO.getLikeCount())
-                .serviceType(basicDTO.getServiceType() != null ? basicDTO.getServiceType() : detailedDTO.getServiceType())
+                .serviceType(
+                        basicDTO.getServiceType() != null ? basicDTO.getServiceType() : detailedDTO.getServiceType())
                 .originalPlatform(basicDTO.getOriginalPlatform())
                 .crawlSource(basicDTO.getCrawlSource())
 
@@ -355,5 +407,3 @@ public class NaverWebtoonCrawler {
         return str == null ? "" : str;
     }
 }
-
-
