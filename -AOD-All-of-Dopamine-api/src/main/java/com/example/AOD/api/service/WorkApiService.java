@@ -5,7 +5,7 @@ import com.example.AOD.api.dto.WorkResponseDTO;
 import com.example.AOD.api.dto.WorkSummaryDTO;
 import com.example.shared.entity.Content;
 import com.example.shared.entity.*;
-// import com.example.AOD.recommendation.repository.ContentRatingRepository;
+import com.example.AOD.repo.ReviewRepository;
 import com.example.shared.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -33,7 +33,7 @@ public class WorkApiService {
     private final WebtoonContentRepository webtoonContentRepository;
     private final WebnovelContentRepository webnovelContentRepository;
     private final PlatformDataRepository platformDataRepository;
-    // private final ContentRatingRepository contentRatingRepository;
+    private final ReviewRepository reviewRepository;
     
     // OTT Watch Providers (영화/시리즈에서 watchProviders 필터링에 사용)
     private static final Set<String> OTT_WATCH_PROVIDERS = Set.of(
@@ -259,7 +259,7 @@ public class WorkApiService {
                 .page(0).size(0).totalElements(0L).totalPages(0)
                 .first(true).last(true).build();
     }
-    
+
     /**
      * ⚠️ Deprecated: 기존 Watch Providers 기반 필터링 (복잡한 로직)
      * 새로운 platforms 컬럼 방식으로 대체됨
@@ -338,7 +338,9 @@ public class WorkApiService {
                 contentPage = contentRepository.searchByKeyword(keyword, pageable);
             }
         } else if (domain != null) {
-            contentPage = contentRepository.findByDomain(domain, pageable);
+            Pageable pageableWithoutSort = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
+            LocalDate maxDate = LocalDate.now().plusYears(1);
+            contentPage = contentRepository.findByDomainOrderByReleaseDateDesc(domain.name(), maxDate, pageableWithoutSort);
         } else {
             contentPage = contentRepository.findAll(pageable);
         }
@@ -401,25 +403,32 @@ public class WorkApiService {
             
             switch (order.getProperty()) {
                 case "masterTitle":
-                    orderComparator = Comparator.comparing(Content::getMasterTitle, 
-                            Comparator.nullsLast(String::compareTo));
+                    if (order.getDirection() == Sort.Direction.DESC) {
+                        orderComparator = Comparator.comparing(Content::getMasterTitle,
+                                Comparator.nullsLast(Comparator.reverseOrder()));
+                    } else {
+                        orderComparator = Comparator.comparing(Content::getMasterTitle,
+                                Comparator.nullsLast(Comparator.naturalOrder()));
+                    }
                     break;
                 case "releaseDate":
-                    orderComparator = Comparator.comparing(Content::getReleaseDate,
-                            Comparator.nullsLast(LocalDate::compareTo));
+                    if (order.getDirection() == Sort.Direction.DESC) {
+                        orderComparator = Comparator.comparing(Content::getReleaseDate,
+                                Comparator.nullsLast(Comparator.reverseOrder()));
+                    } else {
+                        orderComparator = Comparator.comparing(Content::getReleaseDate,
+                                Comparator.nullsLast(Comparator.naturalOrder()));
+                    }
                     break;
                 default:
                     orderComparator = Comparator.comparing(Content::getContentId);
-            }
-            
-            if (order.getDirection() == Sort.Direction.DESC) {
-                orderComparator = orderComparator.reversed();
             }
             
             comparator = (comparator == null) ? orderComparator : comparator.thenComparing(orderComparator);
         }
         
         if (comparator != null) {
+            comparator = comparator.thenComparing(Content::getContentId);
             return contents.stream().sorted(comparator).collect(Collectors.toList());
         }
         
@@ -441,7 +450,7 @@ public class WorkApiService {
                 .releaseDate(content.getReleaseDate() != null ? content.getReleaseDate().toString() : null)
                 .thumbnail(content.getPosterImageUrl())
                 .synopsis(content.getSynopsis())
-                .score(calculateAverageScore(contentId))
+                .score(content.getAverageScore())
                 .build();
 
         // 도메인별 상세 정보 추가
@@ -462,24 +471,12 @@ public class WorkApiService {
                 .domain(content.getDomain().name())
                 .title(content.getMasterTitle())
                 .thumbnail(content.getPosterImageUrl())
-                .score(calculateAverageScore(content.getContentId()))
+                .score(content.getAverageScore())
                 .releaseDate(content.getReleaseDate() != null ? content.getReleaseDate().toString() : null)
                 .build();
     }
 
-    /**
-     * 평균 평점 계산
-     */
-    private Double calculateAverageScore(Long contentId) {
-        // ContentRating의 contentType은 domain을 의미, contentId로 평균 계산
-        // TODO: 추천 기능 추가 후 활성화
-        // Double avg = contentRatingRepository.getAverageRatingByContentTypeAndId("GAME", contentId);
-        // if (avg == null) avg = contentRatingRepository.getAverageRatingByContentTypeAndId("AV", contentId);
-        // if (avg == null) avg = contentRatingRepository.getAverageRatingByContentTypeAndId("WEBTOON", contentId);
-        // if (avg == null) avg = contentRatingRepository.getAverageRatingByContentTypeAndId("WEBNOVEL", contentId);
-        // return avg != null ? avg : 0.0;
-        return 0.0;
-    }
+
 
     /**
      * 도메인별 상세 정보 추출
@@ -621,16 +618,48 @@ public class WorkApiService {
     }
 
     /**
+     * [✨ 신규 기능] 최근 리뷰가 달린 작품 조회
+     */
+    public PageResponse<WorkSummaryDTO> getRecentReviewedWorks(Domain domain, List<String> platforms, Pageable pageable) {
+        Page<Content> contentPage;
+        if (domain != null) {
+            contentPage = contentRepository.findRecentlyReviewedContentsByDomainNative(domain.name(), pageable);
+        } else {
+            contentPage = contentRepository.findRecentlyReviewedContentsNative(pageable);
+        }
+
+        List<Content> allContent = contentPage.getContent();
+
+        // 플랫폼 필터링 - MOVIE/TV는 watchProviders, 나머지는 PlatformData
+        List<Content> filteredContent = filterContentByPlatforms(allContent, domain, platforms);
+
+        List<WorkSummaryDTO> pagedContent = filteredContent.stream()
+                .map(this::toWorkSummary)
+                .collect(Collectors.toList());
+
+        return PageResponse.<WorkSummaryDTO>builder()
+                .content(pagedContent)
+                .page(contentPage.getNumber())
+                .size(contentPage.getSize())
+                .totalElements(contentPage.getTotalElements())
+                .totalPages(contentPage.getTotalPages())
+                .first(contentPage.isFirst())
+                .last(contentPage.isLast())
+                .build();
+    }
+
+    /**
      * 출시 예정작 조회 (아직 출시되지 않은 작품들)
      */
     public PageResponse<WorkSummaryDTO> getUpcomingReleases(Domain domain, List<String> platforms, Pageable pageable) {
         LocalDate now = LocalDate.now();
+        LocalDate oneYearLater = now.plusYears(1);
         
         List<Content> allContent;
         if (domain != null) {
-            allContent = contentRepository.findUpcomingReleases(domain, now, Pageable.unpaged()).getContent();
+            allContent = contentRepository.findUpcomingReleases(domain, now, oneYearLater, Pageable.unpaged()).getContent();
         } else {
-            allContent = contentRepository.findUpcomingReleases(now, Pageable.unpaged()).getContent();
+            allContent = contentRepository.findUpcomingReleases(now, oneYearLater, Pageable.unpaged()).getContent();
         }
 
         // 플랫폼 필터링 - MOVIE/TV는 watchProviders, 나머지는 PlatformData

@@ -45,7 +45,8 @@ public class WorkController {
             }
         }
 
-        Sort sort = Sort.by(Sort.Direction.fromString(sortDirection), sortBy);
+        Sort sort = Sort.by(Sort.Direction.fromString(sortDirection), sortBy)
+                        .and(Sort.by(Sort.Direction.ASC, "contentId"));
         Pageable pageable = PageRequest.of(page, size, sort);
 
         PageResponse<WorkSummaryDTO> response = workApiService.getWorks(domainEnum, keyword, platforms, genres, pageable);
@@ -84,6 +85,31 @@ public class WorkController {
 
         Pageable pageable = PageRequest.of(page, size);
         PageResponse<WorkSummaryDTO> response = workApiService.getRecentReleases(domainEnum, platforms, pageable);
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * [✨ 신규 기능] 최근 리뷰가 달린 작품 조회
+     * GET /api/works/recent-reviews?domain=GAME&platforms=steam,epic&page=0&size=20
+     */
+    @GetMapping("/recent-reviews")
+    public ResponseEntity<PageResponse<WorkSummaryDTO>> getRecentReviewedWorks(
+            @RequestParam(required = false) String domain,
+            @RequestParam(required = false) java.util.List<String> platforms,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size
+    ) {
+        Domain domainEnum = null;
+        if (domain != null && !domain.isBlank()) {
+            try {
+                domainEnum = Domain.valueOf(domain.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid domain parameter: {}", domain);
+            }
+        }
+
+        Pageable pageable = PageRequest.of(page, size);
+        PageResponse<WorkSummaryDTO> response = workApiService.getRecentReviewedWorks(domainEnum, platforms, pageable);
         return ResponseEntity.ok(response);
     }
 
